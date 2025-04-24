@@ -1,0 +1,1051 @@
+Локализуй эту программу для англоязычных пользователей:
+
+from ahk import AHK
+from PIL import Image
+import time
+import threading
+from collections import defaultdict
+import tkinter as tk
+from tkinter import filedialog, messagebox, ttk
+import keyboard
+from pynput import mouse
+import os
+
+ahk = AHK()
+
+# Настройки по умолчанию
+CLICK_DELAY = 0.02
+COLOR_CHANGE_DELAY = 0.06
+MOVEMENT_SPEED = 5
+COLOR_SIMILARITY_THRESHOLD = 5
+COUNTDOWN_SECONDS = 3
+
+# Координаты области рисования (по умолчанию)
+top_left = [640, 35]
+top_right = [1240, 35]
+bottom_left = [640, 955]
+bottom_right = [1240, 955]
+
+# Текстовые поля RGB (по умолчанию)
+R_FIELD = [107, 969]
+G_FIELD = [190, 969]
+B_FIELD = [270, 969]
+
+# Координаты для сохранения рисунка
+SAVE_BUTTON_POS = [1828, 54]
+FILENAME_INPUT_POS = [745, 425]
+FILENAME_CLICK_OFFSET = 10  # Смещение вниз для второго клика
+SAVE_CONFIRM_POS = [938, 425]
+
+current_color = None
+paused = False
+stop_flag = False
+img = None
+img_path = None
+points = []
+hotkey_listener = None
+rgb_points = []
+total_pixels = 0
+processed_pixels = 0
+
+
+class ProgressWindow:
+    def __init__(self, parent):
+        self.top = tk.Toplevel(parent)
+        self.top.title("Прогресс рисования")
+
+        self.progress_label = ttk.Label(self.top, text="Подготовка к рисованию...")
+        self.progress_label.pack(pady=10)
+
+        self.progress_bar = ttk.Progressbar(self.top, orient="horizontal", length=300, mode="determinate")
+        self.progress_bar.pack(pady=10, padx=20)
+
+        self.percentage_label = ttk.Label(self.top, text="0%")
+        self.percentage_label.pack(pady=5)
+
+        self.time_label = ttk.Label(self.top, text="Осталось: вычисляется...")
+        self.time_label.pack(pady=5)
+
+        self.start_time = time.time()
+
+    def update_progress(self, current, total):
+        percentage = int((current / total) * 100)
+        self.progress_bar["value"] = percentage
+        self.percentage_label.config(text=f"{percentage}%")
+
+        # Расчет оставшегося времени
+        elapsed = time.time() - self.start_time
+        if current > 0:
+            remaining = (elapsed / current) * (total - current)
+            mins, secs = divmod(remaining, 60)
+            self.time_label.config(text=f"Осталось: {int(mins)} мин {int(secs)} сек")
+
+        self.top.update_idletasks()
+
+
+def process_by_colors_optimized(progress_window=None, processed_data=None):
+    global processed_pixels
+
+    if not processed_data:
+        return
+
+    total_pixels = processed_data['total_pixels']
+    color_groups = processed_data['color_groups']
+    base_colors = processed_data['base_colors']
+
+    # Проверяем наличие информации о прозрачности
+    is_png_with_alpha = processed_data.get('has_alpha', False)
+
+    if is_png_with_alpha:
+        print("Обнаружено PNG с прозрачностью - прозрачные пиксели будут пропущены")
+        if progress_window:
+            progress_window.progress_label.config(text="Пропуск прозрачных пикселей PNG...")
+
+    # Сначала чёрные (0,0,0) или близкие к ним
+    black_like = [c for c in base_colors if all(v <= 10 for v in c)]
+    if black_like:
+        print("Обработка чёрных и близких пикселей с помощью линейки...")
+        if progress_window:
+            progress_window.progress_label.config(text="Обработка чёрных и близких пикселей с помощью линейки...")
+        select_color(0, 0, 0)
+
+        # Группируем пиксели по строкам
+        rows = defaultdict(list)
+        for color in black_like:
+            for x, y in color_groups[color]:
+                rows[y].append(x)
+
+        # Обрабатываем каждую строку
+        for y in sorted(rows.keys()):
+            x_coords = sorted(rows[y])
+            if not x_coords:
+                continue
+
+            # Находим непрерывные отрезки в строке
+            start_x = x_coords[0]
+            prev_x = x_coords[0]
+
+            for x in x_coords[1:]:
+                if x == prev_x + 1:
+                    prev_x = x
+                else:
+                    # Обрабатываем текущий отрезок
+                    while paused:
+                        if stop_flag: return
+                        time.sleep(0.1)
+                    if stop_flag: return
+
+                    process_line(start_x, prev_x, y)
+                    processed_pixels += (prev_x - start_x + 1)
+                    if progress_window and processed_pixels % 100 == 0:
+                        progress_window.update_progress(processed_pixels, total_pixels)
+
+                    # Начинаем новый отрезок
+                    start_x = x
+                    prev_x = x
+
+            # Обрабатываем последний отрезок в строке
+            while paused:
+                if stop_flag: return
+                time.sleep(0.1)
+            if stop_flag: return
+
+            process_line(start_x, prev_x, y)
+            processed_pixels += (prev_x - start_x + 1)
+            if progress_window and processed_pixels % 100 == 0:
+                progress_window.update_progress(processed_pixels, total_pixels)
+
+    # Затем белые (255,255,255) или близкие
+    white_like = [c for c in base_colors if all(v >= 245 for v in c)]
+    if white_like:
+        print("Обработка белых и близких пикселей с помощью линейки...")
+        if progress_window:
+            progress_window.progress_label.config(text="Обработка белых и близких пикселей с помощью линейки...")
+        select_color(255, 255, 255)
+
+        # Группируем пиксели по строкам
+        rows = defaultdict(list)
+        for color in white_like:
+            for x, y in color_groups[color]:
+                rows[y].append(x)
+
+        # Обрабатываем каждую строку
+        for y in sorted(rows.keys()):
+            x_coords = sorted(rows[y])
+            if not x_coords:
+                continue
+
+            # Находим непрерывные отрезки в строке
+            start_x = x_coords[0]
+            prev_x = x_coords[0]
+
+            for x in x_coords[1:]:
+                if x == prev_x + 1:
+                    prev_x = x
+                else:
+                    # Обрабатываем текущий отрезок
+                    while paused:
+                        if stop_flag: return
+                        time.sleep(0.1)
+                    if stop_flag: return
+
+                    process_line(start_x, prev_x, y)
+                    processed_pixels += (prev_x - start_x + 1)
+                    if progress_window and processed_pixels % 100 == 0:
+                        progress_window.update_progress(processed_pixels, total_pixels)
+
+                    # Начинаем новый отрезок
+                    start_x = x
+                    prev_x = x
+
+            # Обрабатываем последний отрезок в строке
+            while paused:
+                if stop_flag: return
+                time.sleep(0.1)
+            if stop_flag: return
+
+            process_line(start_x, prev_x, y)
+            processed_pixels += (prev_x - start_x + 1)
+            if progress_window and processed_pixels % 100 == 0:
+                progress_window.update_progress(processed_pixels, total_pixels)
+
+    # Затем все остальные цвета
+    remaining_colors = [c for c in base_colors if c not in black_like and c not in white_like]
+    for color in remaining_colors:
+        print(f"Обработка цвета R={color[0]} G={color[1]} B={color[2]}...")
+        if progress_window:
+            progress_window.progress_label.config(text=f"Обработка цвета R={color[0]} G={color[1]} B={color[2]}...")
+        select_color(*color)
+        for x, y in color_groups[color]:
+            while paused:
+                if stop_flag: return
+                time.sleep(0.1)
+            if stop_flag: return
+            click_pixel(x, y)
+            processed_pixels += 1
+            if progress_window and processed_pixels % 100 == 0:
+                progress_window.update_progress(processed_pixels, total_pixels)
+
+
+
+class DrawingApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Spray Paint Drawing Tool")
+        self.progress_window = None
+        self.processed_data = None
+        self.setup_hotkeys()
+        self.create_widgets()
+        self.update_coordinates_display()
+        self.update_rgb_fields_display()
+
+    def setup_hotkeys(self):
+        global hotkey_listener
+        if hotkey_listener:
+            keyboard.unhook(hotkey_listener)
+
+        def on_key_event(e):
+            if e.event_type == keyboard.KEY_DOWN:
+                if e.name.lower() == 'm' and keyboard.is_pressed('shift'):
+                    self.toggle_pause()
+                elif e.name.lower() == 'n' and keyboard.is_pressed('shift'):
+                    self.toggle_pause(resume=True)
+
+        hotkey_listener = keyboard.hook(on_key_event)
+
+    def create_widgets(self):
+        # Основные фреймы
+        self.main_frame = ttk.Frame(self.root)
+        self.main_frame.pack(pady=10, padx=10, fill="both", expand=True)
+
+        # Фрейм изображения
+        self.image_frame = ttk.LabelFrame(self.main_frame, text="Изображение")
+        self.image_frame.pack(fill="x", pady=5)
+
+        self.select_btn = ttk.Button(self.image_frame, text="Выбрать изображение", command=self.select_image)
+        self.select_btn.pack(side="left", padx=5, pady=5)
+
+        self.image_status = ttk.Label(self.image_frame, text="Не выбрано")
+        self.image_status.pack(side="left", padx=5, pady=5, fill="x", expand=True)
+
+        # Фрейм координат рисования
+        self.coord_frame = ttk.LabelFrame(self.main_frame, text="Границы рисования")
+        self.coord_frame.pack(fill="x", pady=5)
+
+        # Верхняя левая точка
+        ttk.Label(self.coord_frame, text="Верхняя левая:").grid(row=0, column=0, padx=5, pady=2, sticky="e")
+        self.tl_x_entry = ttk.Entry(self.coord_frame, width=6)
+        self.tl_x_entry.grid(row=0, column=1, padx=2, pady=2)
+        self.tl_y_entry = ttk.Entry(self.coord_frame, width=6)
+        self.tl_y_entry.grid(row=0, column=2, padx=2, pady=2)
+
+        # Верхняя правая точка
+        ttk.Label(self.coord_frame, text="Верхняя правая:").grid(row=1, column=0, padx=5, pady=2, sticky="e")
+        self.tr_x_entry = ttk.Entry(self.coord_frame, width=6)
+        self.tr_x_entry.grid(row=1, column=1, padx=2, pady=2)
+        self.tr_y_entry = ttk.Entry(self.coord_frame, width=6)
+        self.tr_y_entry.grid(row=1, column=2, padx=2, pady=2)
+
+        # Нижняя левая точка
+        ttk.Label(self.coord_frame, text="Нижняя левая:").grid(row=2, column=0, padx=5, pady=2, sticky="e")
+        self.bl_x_entry = ttk.Entry(self.coord_frame, width=6)
+        self.bl_x_entry.grid(row=2, column=1, padx=2, pady=2)
+        self.bl_y_entry = ttk.Entry(self.coord_frame, width=6)
+        self.bl_y_entry.grid(row=2, column=2, padx=2, pady=2)
+
+        # Нижняя правая точка
+        ttk.Label(self.coord_frame, text="Нижняя правая:").grid(row=3, column=0, padx=5, pady=2, sticky="e")
+        self.br_x_entry = ttk.Entry(self.coord_frame, width=6)
+        self.br_x_entry.grid(row=3, column=1, padx=2, pady=2)
+        self.br_y_entry = ttk.Entry(self.coord_frame, width=6)
+        self.br_y_entry.grid(row=3, column=2, padx=2, pady=2)
+
+        # Кнопки управления координатами
+        self.coord_btn_frame = ttk.Frame(self.coord_frame)
+        self.coord_btn_frame.grid(row=4, column=0, columnspan=3, pady=5)
+
+        self.set_bounds_btn = ttk.Button(self.coord_btn_frame,
+                                         text="Захватить границы (F+Alt+ЛКМ)",
+                                         command=self.set_drawing_bounds)
+        self.set_bounds_btn.pack(side="left", padx=5)
+
+        self.save_coords_btn = ttk.Button(self.coord_btn_frame,
+                                          text="Сохранить координаты",
+                                          command=self.save_coordinates)
+        self.save_coords_btn.pack(side="left", padx=5)
+
+        # Фрейм RGB полей
+        self.rgb_frame = ttk.LabelFrame(self.main_frame, text="Поля ввода RGB")
+        self.rgb_frame.pack(fill="x", pady=5)
+
+        # Поле Red
+        ttk.Label(self.rgb_frame, text="Red:").grid(row=0, column=0, padx=5, pady=2, sticky="e")
+        self.r_x_entry = ttk.Entry(self.rgb_frame, width=6)
+        self.r_x_entry.grid(row=0, column=1, padx=2, pady=2)
+        self.r_y_entry = ttk.Entry(self.rgb_frame, width=6)
+        self.r_y_entry.grid(row=0, column=2, padx=2, pady=2)
+
+        # Поле Green
+        ttk.Label(self.rgb_frame, text="Green:").grid(row=1, column=0, padx=5, pady=2, sticky="e")
+        self.g_x_entry = ttk.Entry(self.rgb_frame, width=6)
+        self.g_x_entry.grid(row=1, column=1, padx=2, pady=2)
+        self.g_y_entry = ttk.Entry(self.rgb_frame, width=6)
+        self.g_y_entry.grid(row=1, column=2, padx=2, pady=2)
+
+        # Поле Blue
+        ttk.Label(self.rgb_frame, text="Blue:").grid(row=2, column=0, padx=5, pady=2, sticky="e")
+        self.b_x_entry = ttk.Entry(self.rgb_frame, width=6)
+        self.b_x_entry.grid(row=2, column=1, padx=2, pady=2)
+        self.b_y_entry = ttk.Entry(self.rgb_frame, width=6)
+        self.b_y_entry.grid(row=2, column=2, padx=2, pady=2)
+
+        # Кнопки RGB полей
+        self.rgb_btn_frame = ttk.Frame(self.rgb_frame)
+        self.rgb_btn_frame.grid(row=3, column=0, columnspan=3, pady=5)
+
+        self.rgb_capture_btn = ttk.Button(self.rgb_btn_frame,
+                                          text="Захватить RGB поля (Alt+F+ПКМ)",
+                                          command=self.capture_rgb_fields)
+        self.rgb_capture_btn.pack(side="left", padx=5)
+
+        self.save_rgb_btn = ttk.Button(self.rgb_btn_frame,
+                                       text="Сохранить RGB поля",
+                                       command=self.save_rgb_fields)
+        self.save_rgb_btn.pack(side="left", padx=5)
+
+        # Фрейм настроек
+        self.settings_frame = ttk.LabelFrame(self.main_frame, text="Настройки")
+        self.settings_frame.pack(fill="x", pady=5)
+
+        ttk.Label(self.settings_frame, text="Задержка старта (сек):").grid(row=0, column=0, padx=5, pady=2, sticky="e")
+        self.countdown_entry = ttk.Entry(self.settings_frame, width=6)
+        self.countdown_entry.insert(0, str(COUNTDOWN_SECONDS))
+        self.countdown_entry.grid(row=0, column=1, padx=5, pady=2, sticky="w")
+
+        # Чекбокс для режима линейки
+        self.ruler_var = tk.BooleanVar(value=True)
+        self.ruler_check = ttk.Checkbutton(self.settings_frame,
+                                           text="Использовать линейку для черного/белого",
+                                           variable=self.ruler_var,
+                                           command=self.toggle_ruler_mode)
+        self.ruler_check.grid(row=1, column=0, columnspan=2, pady=5, sticky="w")
+
+        # Фрейм управления
+        self.control_frame = ttk.LabelFrame(self.main_frame, text="Управление")
+        self.control_frame.pack(fill="x", pady=5)
+
+        # Верхний ряд кнопок
+        self.top_control_frame = ttk.Frame(self.control_frame)
+        self.top_control_frame.pack(fill="x", pady=5)
+
+        self.process_btn = ttk.Button(self.top_control_frame,
+                                      text="Обработать картинку",
+                                      command=self.process_image,
+                                      state="disabled")
+        self.process_btn.pack(side="left", padx=5, expand=True, fill="x")
+
+        self.progress_btn = ttk.Button(self.top_control_frame,
+                                       text="Показать прогресс",
+                                       command=self.show_progress,
+                                       state="disabled")
+        self.progress_btn.pack(side="left", padx=5, expand=True, fill="x")
+
+        # Нижний ряд кнопок
+        self.bottom_control_frame = ttk.Frame(self.control_frame)
+        self.bottom_control_frame.pack(fill="x", pady=(0, 5))
+
+        self.start_btn = ttk.Button(self.bottom_control_frame,
+                                    text="Начать рисование",
+                                    command=self.start_drawing,
+                                    state="disabled")
+        self.start_btn.pack(side="left", padx=5, expand=True, fill="x")
+
+        self.stop_btn = ttk.Button(self.bottom_control_frame,
+                                   text="Остановить",
+                                   command=self.stop_drawing,
+                                   state="disabled")
+        self.stop_btn.pack(side="left", padx=5, expand=True, fill="x")
+
+        # Статусная строка
+        self.status_frame = ttk.Frame(self.main_frame)
+        self.status_frame.pack(fill="x", pady=5)
+
+        self.hotkey_label = ttk.Label(self.status_frame,
+                                      text="Пауза: Shift+M | Возобновить: Shift+N")
+        self.hotkey_label.pack(side="left", padx=5)
+
+        self.status_label = ttk.Label(self.status_frame, text="Выберите изображение для начала")
+        self.status_label.pack(side="right", padx=5)
+
+    def toggle_ruler_mode(self):
+        """Переключает режим использования линейки"""
+        self.use_ruler = self.ruler_var.get()
+        status = "включен" if self.use_ruler else "выключен"
+        self.status_label.config(text=f"Режим линейки: {status}")
+        print(f"Режим линейки: {status}")
+
+    def show_progress(self):
+        if self.progress_window is None or not tk.Toplevel.winfo_exists(self.progress_window.top):
+            self.progress_window = ProgressWindow(self.root)
+        else:
+            self.progress_window.top.lift()
+
+
+    def update_coordinates_display(self):
+        self.tl_x_entry.delete(0, tk.END)
+        self.tl_x_entry.insert(0, str(top_left[0]))
+        self.tl_y_entry.delete(0, tk.END)
+        self.tl_y_entry.insert(0, str(top_left[1]))
+
+        self.tr_x_entry.delete(0, tk.END)
+        self.tr_x_entry.insert(0, str(top_right[0]))
+        self.tr_y_entry.delete(0, tk.END)
+        self.tr_y_entry.insert(0, str(top_right[1]))
+
+        self.bl_x_entry.delete(0, tk.END)
+        self.bl_x_entry.insert(0, str(bottom_left[0]))
+        self.bl_y_entry.delete(0, tk.END)
+        self.bl_y_entry.insert(0, str(bottom_left[1]))
+
+        self.br_x_entry.delete(0, tk.END)
+        self.br_x_entry.insert(0, str(bottom_right[0]))
+        self.br_y_entry.delete(0, tk.END)
+        self.br_y_entry.insert(0, str(bottom_right[1]))
+
+    def update_rgb_fields_display(self):
+        self.r_x_entry.delete(0, tk.END)
+        self.r_x_entry.insert(0, str(R_FIELD[0]))
+        self.r_y_entry.delete(0, tk.END)
+        self.r_y_entry.insert(0, str(R_FIELD[1]))
+
+        self.g_x_entry.delete(0, tk.END)
+        self.g_x_entry.insert(0, str(G_FIELD[0]))
+        self.g_y_entry.delete(0, tk.END)
+        self.g_y_entry.insert(0, str(G_FIELD[1]))
+
+        self.b_x_entry.delete(0, tk.END)
+        self.b_x_entry.insert(0, str(B_FIELD[0]))
+        self.b_y_entry.delete(0, tk.END)
+        self.b_y_entry.insert(0, str(B_FIELD[1]))
+
+    def save_coordinates(self):
+        try:
+            top_left[0] = int(self.tl_x_entry.get())
+            top_left[1] = int(self.tl_y_entry.get())
+            top_right[0] = int(self.tr_x_entry.get())
+            top_right[1] = int(self.tr_y_entry.get())
+            bottom_left[0] = int(self.bl_x_entry.get())
+            bottom_left[1] = int(self.bl_y_entry.get())
+            bottom_right[0] = int(self.br_x_entry.get())
+            bottom_right[1] = int(self.br_y_entry.get())
+
+            with open("coordinates.txt", "w", encoding="utf-8") as file:
+                file.write(f"Верхняя левая точка = {top_left}\n")
+                file.write(f"Верхняя правая точка = {top_right}\n")
+                file.write(f"Нижняя левая точка = {bottom_left}\n")
+                file.write(f"Нижняя правая точка = {bottom_right}\n")
+
+            self.status_label.config(text="Координаты успешно сохранены!")
+        except ValueError:
+            messagebox.showerror("Ошибка", "Введите корректные числовые значения координат")
+
+    def save_rgb_fields(self):
+        try:
+            R_FIELD[0] = int(self.r_x_entry.get())
+            R_FIELD[1] = int(self.r_y_entry.get())
+            G_FIELD[0] = int(self.g_x_entry.get())
+            G_FIELD[1] = int(self.g_y_entry.get())
+            B_FIELD[0] = int(self.b_x_entry.get())
+            B_FIELD[1] = int(self.b_y_entry.get())
+
+            with open("rgb_fields.txt", "w", encoding="utf-8") as file:
+                file.write(f"Red поле = {R_FIELD}\n")
+                file.write(f"Green поле = {G_FIELD}\n")
+                file.write(f"Blue поле = {B_FIELD}\n")
+
+            self.status_label.config(text="Координаты RGB полей сохранены!")
+        except ValueError:
+            messagebox.showerror("Ошибка", "Введите корректные числовые значения координат")
+
+    def capture_rgb_fields(self):
+        global rgb_points
+        rgb_points = []
+        self.status_label.config(text="Режим записи RGB полей: Нажмите Alt+F+ПКМ")
+        self.root.iconify()
+
+        def on_click(x, y, button, pressed):
+            if pressed and button == mouse.Button.left and keyboard.is_pressed('f') and keyboard.is_pressed('alt'):
+                rgb_points.append((x, y))
+                print(f"Записана точка {len(rgb_points)}: [{x},{y}]")
+
+                if len(rgb_points) == 1:
+                    print("Выберите поле Green")
+                elif len(rgb_points) == 2:
+                    print("Выберите поле Blue")
+                elif len(rgb_points) == 3:
+                    self.save_rgb_points()
+                    return False
+
+        def save_rgb_points():
+            R_FIELD[0], R_FIELD[1] = rgb_points[0]
+            G_FIELD[0], G_FIELD[1] = rgb_points[1]
+            B_FIELD[0], B_FIELD[1] = rgb_points[2]
+
+            self.root.deiconify()
+            self.update_rgb_fields_display()
+            self.status_label.config(text="Координаты RGB полей установлены!")
+
+        print("\nНажмите Alt+F+ЛКМ, чтобы записать координаты RGB полей.")
+        listener = mouse.Listener(on_click=on_click)
+        listener.start()
+
+    def select_image(self):
+        global img, img_path
+        file_path = filedialog.askopenfilename(
+            title="Выберите изображение",
+            filetypes=(("Image files", "*.jpg;*.jpeg;*.png"), ("All files", "*.*"))
+        )
+
+        if file_path:
+            try:
+                # Открываем изображение с сохранением альфа-канала для PNG
+                img = Image.open(file_path)
+                if img.mode != 'RGBA' and file_path.lower().endswith('.png'):
+                    img = img.convert('RGBA')
+                elif img.mode != 'RGB':
+                    img = img.convert('RGB')
+
+                img_path = file_path
+                self.image_status.config(text=os.path.basename(file_path))
+                self.process_btn.config(state="normal")
+                self.progress_btn.config(state="normal")
+                self.start_btn.config(state="disabled")
+                self.processed_data = None
+                self.status_label.config(text="Изображение загружено. Обработайте его перед рисованием")
+            except Exception as e:
+                messagebox.showerror("Ошибка", f"Не удалось загрузить изображение: {e}")
+
+        if file_path:
+            try:
+                img = Image.open(file_path).convert("RGB")
+                img_path = file_path
+                self.image_status.config(text=os.path.basename(file_path))
+                self.process_btn.config(state="normal")
+                self.progress_btn.config(state="normal")
+                self.start_btn.config(state="disabled")
+                self.processed_data = None
+                self.status_label.config(text="Изображение загружено. Обработайте его перед рисованием")
+            except Exception as e:
+                messagebox.showerror("Ошибка", f"Не удалось загрузить изображение: {e}")
+
+    def process_image(self):
+        if not img:
+            messagebox.showerror("Ошибка", "Сначала выберите изображение")
+            return
+
+        try:
+            self.status_label.config(text="Обработка изображения...")
+            self.root.update()
+
+            start_time = time.time()
+            self.processed_data = self.analyze_image()
+            processing_time = time.time() - start_time
+
+            self.status_label.config(text=f"Изображение обработано за {processing_time:.1f} сек!")
+            self.start_btn.config(state="normal")
+            messagebox.showinfo("Готово",
+                                f"Изображение обработано за {processing_time:.1f} сек\n"
+                                f"Найдено цветов: {len(self.processed_data['base_colors'])}\n"
+                                f"Черных пикселей: {len([c for c in self.processed_data['base_colors'] if all(v <= 10 for v in c)])}\n"
+                                f"Белых пикселей: {len([c for c in self.processed_data['base_colors'] if all(v >= 245 for v in c)])}")
+
+        except Exception as e:
+            messagebox.showerror("Ошибка", f"Ошибка при обработке изображения: {e}")
+            self.status_label.config(text="Ошибка обработки")
+
+    def analyze_image(self):
+        analysis = {
+            'width': img.width,
+            'height': img.height,
+            'total_pixels': img.width * img.height,
+            'color_groups': defaultdict(list),
+            'base_colors': [],
+            'has_alpha': img.mode == 'RGBA'  # Сохраняем информацию о прозрачности
+        }
+
+        for y in range(img.height):
+            for x in range(img.width):
+                pixel = img.getpixel((x, y))
+
+                # Пропускаем прозрачные пиксели для PNG
+                if analysis['has_alpha'] and len(pixel) == 4 and pixel[3] == 0:
+                    continue
+
+                rgb = pixel[:3]
+                matched = False
+
+                for base in analysis['base_colors']:
+                    if colors_similar(base, rgb):
+                        analysis['color_groups'][base].append((x, y))
+                        matched = True
+                        break
+
+                if not matched:
+                    analysis['base_colors'].append(rgb)
+                    analysis['color_groups'][rgb].append((x, y))
+
+        return analysis
+
+    def process_by_colors_optimized(progress_window=None, processed_data=None):
+        global processed_pixels
+
+        if not processed_data:
+            return
+
+        total_pixels = processed_data['total_pixels']
+        color_groups = processed_data['color_groups']
+        base_colors = processed_data['base_colors']
+        is_png_with_alpha = processed_data.get('has_alpha', False)
+
+        if is_png_with_alpha:
+            print("PNG с прозрачностью - пропускаем прозрачные пиксели")
+            if progress_window:
+                progress_window.progress_label.config(text="Пропуск прозрачных пикселей PNG...")
+    def set_drawing_bounds(self):
+        global points
+        points = []
+        self.status_label.config(text="Режим записи координат: Нажмите F+Alt+ЛКМ")
+        self.root.iconify()
+
+        def on_click(x, y, button, pressed):
+            if pressed and button == mouse.Button.left and keyboard.is_pressed('f') and keyboard.is_pressed('alt'):
+                points.append((x, y))
+                print(f"Записана точка {len(points)}: [{x},{y}]")
+
+                if len(points) == 1:
+                    print("Выберите верхнюю правую точку")
+                elif len(points) == 2:
+                    print("Выберите нижнюю левую точку")
+                elif len(points) == 3:
+                    print("Выберите нижнюю правую точку")
+                elif len(points) == 4:
+                    save_points()
+                    return False
+
+        def save_points():
+            top_left[0], top_left[1] = points[0]
+            top_right[0], top_right[1] = points[1]
+            bottom_left[0], bottom_left[1] = points[2]
+            bottom_right[0], bottom_right[1] = points[3]
+
+            self.root.deiconify()
+            self.update_coordinates_display()
+            self.status_label.config(text="Границы установлены!")
+
+        print("\nНажмите F+Alt+ЛКМ, чтобы записать точки.")
+        listener = mouse.Listener(on_click=on_click)
+        listener.start()
+
+    def toggle_pause(self, resume=False):
+        global paused
+        if resume:
+            paused = False
+            self.status_label.config(text="Рисование продолжено")
+        else:
+            paused = True
+            self.status_label.config(text="Рисование приостановлено")
+
+    def start_drawing(self):
+        if not self.processed_data:
+            messagebox.showerror("Ошибка", "Сначала обработайте изображение")
+            return
+
+        try:
+            COUNTDOWN_SECONDS = int(self.countdown_entry.get())
+            if COUNTDOWN_SECONDS < 0:
+                raise ValueError
+        except ValueError:
+            messagebox.showerror("Ошибка", "Введите корректное число секунд")
+            return
+
+        global stop_flag, paused, processed_pixels
+        stop_flag = False
+        paused = False
+        processed_pixels = 0
+
+        self.disable_controls()
+        self.status_label.config(text=f"Начинаем через {COUNTDOWN_SECONDS} сек...")
+
+        self.show_progress()
+        self.progress_window.progress_label.config(text="Подготовка к рисованию...")
+        self.progress_window.progress_bar["value"] = 0
+        self.progress_window.percentage_label.config(text="0%")
+        self.progress_window.time_label.config(text="Осталось: вычисляется...")
+        self.progress_window.start_time = time.time()
+
+        drawing_thread = threading.Thread(target=self.run_drawing, daemon=True)
+        drawing_thread.start()
+
+    def disable_controls(self):
+        self.select_btn.config(state="disabled")
+        self.set_bounds_btn.config(state="disabled")
+        self.save_coords_btn.config(state="disabled")
+        self.rgb_capture_btn.config(state="disabled")
+        self.save_rgb_btn.config(state="disabled")
+        self.start_btn.config(state="disabled")
+        self.process_btn.config(state="disabled")
+        self.stop_btn.config(state="normal")
+
+    def enable_controls(self):
+        self.select_btn.config(state="normal")
+        self.set_bounds_btn.config(state="normal")
+        self.save_coords_btn.config(state="normal")
+        self.rgb_capture_btn.config(state="normal")
+        self.save_rgb_btn.config(state="normal")
+        self.start_btn.config(state="normal" if self.processed_data else "disabled")
+        self.process_btn.config(state="normal")
+        self.stop_btn.config(state="disabled")
+
+    def run_drawing(self):
+        for i in range(COUNTDOWN_SECONDS, 0, -1):
+            if stop_flag:
+                return
+            self.status_label.config(text=f"Начинаем через {i} сек...")
+            if self.progress_window:
+                self.progress_window.progress_label.config(text=f"Начинаем через {i} сек...")
+            time.sleep(1)
+
+        if stop_flag:
+            return
+
+        self.status_label.config(text="Рисование начато...")
+        if self.progress_window:
+            self.progress_window.progress_label.config(text="Рисование начато...")
+
+        process_by_colors_optimized(self.progress_window, self.processed_data)
+
+        if not stop_flag:
+            self.save_drawing()
+            self.stop_drawing()
+            print("Рисование завершено!")
+            if self.progress_window:
+                self.progress_window.progress_label.config(text="Рисование завершено!")
+                self.progress_window.progress_bar["value"] = 100
+                self.progress_window.percentage_label.config(text="100%")
+                self.progress_window.time_label.config(text="Завершено!")
+
+    def stop_drawing(self):
+        global stop_flag, paused
+        stop_flag = True
+        paused = False
+        self.enable_controls()
+        self.status_label.config(text="Рисование остановлено")
+
+    def save_drawing(self):
+        if not img_path:
+            return
+
+        filename = os.path.splitext(os.path.basename(img_path))[0]
+
+        ahk.mouse_move(SAVE_BUTTON_POS[0], SAVE_BUTTON_POS[1], speed=MOVEMENT_SPEED)
+        ahk.click()
+        time.sleep(0.5)
+
+        ahk.mouse_move(FILENAME_INPUT_POS[0], FILENAME_INPUT_POS[1], speed=MOVEMENT_SPEED)
+        ahk.click()
+        time.sleep(0.2)
+
+        ahk.mouse_move(FILENAME_INPUT_POS[0], FILENAME_INPUT_POS[1] + FILENAME_CLICK_OFFSET, speed=MOVEMENT_SPEED)
+        ahk.click()
+        time.sleep(0.2)
+
+        ahk.send_input('^a')
+        time.sleep(0.1)
+        ahk.send_input('{Backspace}')
+        time.sleep(0.1)
+        ahk.send_input(filename)
+        time.sleep(0.2)
+
+        ahk.mouse_move(SAVE_CONFIRM_POS[0], SAVE_CONFIRM_POS[1], speed=MOVEMENT_SPEED)
+        ahk.click()
+        time.sleep(0.5)
+
+        print(f"Рисунок сохранён как '{filename}'")
+
+
+def colors_similar(c1, c2):
+    """Проверяет, похожи ли цвета (отличие не более чем на 10 по каждому каналу)"""
+    return all(abs(c1[i] - c2[i]) <= COLOR_SIMILARITY_THRESHOLD for i in range(3))
+
+
+def select_color(R, G, B):
+    global current_color
+    if current_color and colors_similar(current_color, (R, G, B)):
+        return
+
+    def enter_value(pos, value):
+        ahk.mouse_move(pos[0], pos[1], speed=MOVEMENT_SPEED)
+        ahk.click()
+        time.sleep(0.05)
+        ahk.send_input('^a')
+        time.sleep(0.05)
+        ahk.send_input('{Backspace}')
+        time.sleep(0.05)
+        ahk.send_input(str(value))
+        time.sleep(COLOR_CHANGE_DELAY / 3)
+
+    enter_value(R_FIELD, R)
+    enter_value(G_FIELD, G)
+    enter_value(B_FIELD, B)
+
+    current_color = (R, G, B)
+    time.sleep(COLOR_CHANGE_DELAY)
+
+
+def click_pixel(x, y):
+    x_ratio, y_ratio = x / img.width, y / img.height
+    screen_x = top_left[0] * (1 - x_ratio) * (1 - y_ratio) + top_right[0] * x_ratio * (1 - y_ratio) + \
+               bottom_left[0] * (1 - x_ratio) * y_ratio + bottom_right[0] * x_ratio * y_ratio
+    screen_y = top_left[1] * (1 - x_ratio) * (1 - y_ratio) + top_right[1] * x_ratio * (1 - y_ratio) + \
+               bottom_left[1] * (1 - x_ratio) * y_ratio + bottom_right[1] * x_ratio * y_ratio
+
+    ahk.mouse_move(screen_x, screen_y, speed=MOVEMENT_SPEED)
+    ahk.click()
+    time.sleep(CLICK_DELAY)
+
+
+def process_line(start_x, end_x, y):
+    """Обрабатывает строку одного цвета с плавным движением мыши"""
+    # Получаем экранные координаты
+    start_ratio, end_ratio = start_x / img.width, end_x / img.width
+    y_ratio = y / img.height
+
+    # Вычисляем экранные координаты
+    start_screen_x = top_left[0] * (1 - start_ratio) * (1 - y_ratio) + top_right[0] * start_ratio * (1 - y_ratio) + \
+                     bottom_left[0] * (1 - start_ratio) * y_ratio + bottom_right[0] * start_ratio * y_ratio
+    start_screen_y = top_left[1] * (1 - start_ratio) * (1 - y_ratio) + top_right[1] * start_ratio * (1 - y_ratio) + \
+                     bottom_left[1] * (1 - start_ratio) * y_ratio + bottom_right[1] * start_ratio * y_ratio
+
+    end_screen_x = top_left[0] * (1 - end_ratio) * (1 - y_ratio) + top_right[0] * end_ratio * (1 - y_ratio) + \
+                   bottom_left[0] * (1 - end_ratio) * y_ratio + bottom_right[0] * end_ratio * y_ratio
+    end_screen_y = top_left[1] * (1 - end_ratio) * (1 - y_ratio) + top_right[1] * end_ratio * (1 - y_ratio) + \
+                   bottom_left[1] * (1 - end_ratio) * y_ratio + bottom_right[1] * end_ratio * y_ratio
+
+    # Перемещаемся к началу строки
+    ahk.mouse_move(start_screen_x, start_screen_y, speed=MOVEMENT_SPEED)
+    time.sleep(0.05)
+
+    # Нажимаем ЛКМ (эмуляция через mouse_drag)
+    ahk.click(button="L", direction="D")  # Нажатие кнопки вниз
+    time.sleep(0.05)
+
+    # Плавно перемещаемся к концу строки
+    ahk.mouse_move(end_screen_x, end_screen_y, speed=MOVEMENT_SPEED)
+    time.sleep(0.05)
+
+    # Отпускаем ЛКМ (эмуляция через mouse_drag)
+    ahk.click(button="L", direction="U")  # Отпускание кнопки
+    time.sleep(CLICK_DELAY)
+
+def process_by_colors(progress_window=None):
+    global processed_pixels, total_pixels
+
+    # Группируем похожие цвета
+    color_groups = defaultdict(list)
+    base_colors = []
+
+    for y in range(img.height):
+        for x in range(img.width):
+            pixel = img.getpixel((x, y))
+            if len(pixel) == 4 and pixel[3] == 0:  # Пропускаем прозрачные
+                continue
+
+            rgb = pixel[:3]
+            matched = False
+
+            # Ищем похожий базовый цвет
+            for base in base_colors:
+                if colors_similar(base, rgb):
+                    color_groups[base].append((x, y))
+                    matched = True
+                    break
+
+            # Если не нашли похожий - создаем новую группу
+            if not matched:
+                base_colors.append(rgb)
+                color_groups[rgb].append((x, y))
+
+    # Сначала чёрные (0,0,0) или близкие к ним
+    black_like = [c for c in base_colors if all(v <= 10 for v in c)]
+    if black_like:
+        print("Обработка чёрных и близких пикселей с помощью линейки...")
+        if progress_window:
+            progress_window.progress_label.config(text="Обработка чёрных и близких пикселей с помощью линейки...")
+        select_color(0, 0, 0)
+
+        # Группируем пиксели по строкам
+        rows = defaultdict(list)
+        for color in black_like:
+            for x, y in color_groups[color]:
+                rows[y].append(x)
+
+        # Обрабатываем каждую строку
+        for y in sorted(rows.keys()):
+            x_coords = sorted(rows[y])
+            if not x_coords:
+                continue
+
+            # Находим непрерывные отрезки в строке
+            start_x = x_coords[0]
+            prev_x = x_coords[0]
+
+            for x in x_coords[1:]:
+                if x == prev_x + 1:
+                    prev_x = x
+                else:
+                    # Обрабатываем текущий отрезок
+                    while paused:
+                        if stop_flag: return
+                        time.sleep(0.1)
+                    if stop_flag: return
+
+                    process_line(start_x, prev_x, y)
+                    processed_pixels += (prev_x - start_x + 1)
+                    if progress_window and processed_pixels % 100 == 0:
+                        progress_window.update_progress(processed_pixels, total_pixels)
+
+                    # Начинаем новый отрезок
+                    start_x = x
+                    prev_x = x
+
+            # Обрабатываем последний отрезок в строке
+            while paused:
+                if stop_flag: return
+                time.sleep(0.1)
+            if stop_flag: return
+
+            process_line(start_x, prev_x, y)
+            processed_pixels += (prev_x - start_x + 1)
+            if progress_window and processed_pixels % 100 == 0:
+                progress_window.update_progress(processed_pixels, total_pixels)
+
+    # Затем белые (255,255,255) или близкие
+    white_like = [c for c in base_colors if all(v >= 245 for v in c)]
+    if white_like:
+        print("Обработка белых и близких пикселей с помощью линейки...")
+        if progress_window:
+            progress_window.progress_label.config(text="Обработка белых и близких пикселей с помощью линейки...")
+        select_color(255, 255, 255)
+
+        # Группируем пиксели по строкам
+        rows = defaultdict(list)
+        for color in white_like:
+            for x, y in color_groups[color]:
+                rows[y].append(x)
+
+        # Обрабатываем каждую строку
+        for y in sorted(rows.keys()):
+            x_coords = sorted(rows[y])
+            if not x_coords:
+                continue
+
+            # Находим непрерывные отрезки в строке
+            start_x = x_coords[0]
+            prev_x = x_coords[0]
+
+            for x in x_coords[1:]:
+                if x == prev_x + 1:
+                    prev_x = x
+                else:
+                    # Обрабатываем текущий отрезок
+                    while paused:
+                        if stop_flag: return
+                        time.sleep(0.1)
+                    if stop_flag: return
+
+                    process_line(start_x, prev_x, y)
+                    processed_pixels += (prev_x - start_x + 1)
+                    if progress_window and processed_pixels % 100 == 0:
+                        progress_window.update_progress(processed_pixels, total_pixels)
+
+                    # Начинаем новый отрезок
+                    start_x = x
+                    prev_x = x
+
+            # Обрабатываем последний отрезок в строке
+            while paused:
+                if stop_flag: return
+                time.sleep(0.1)
+            if stop_flag: return
+
+            process_line(start_x, prev_x, y)
+            processed_pixels += (prev_x - start_x + 1)
+            if progress_window and processed_pixels % 100 == 0:
+                progress_window.update_progress(processed_pixels, total_pixels)
+
+    # Затем все остальные цвета (обрабатываем как раньше)
+    remaining_colors = [c for c in base_colors if c not in black_like and c not in white_like]
+    for color in remaining_colors:
+        print(f"Обработка цвета R={color[0]} G={color[1]} B={color[2]}...")
+        if progress_window:
+            progress_window.progress_label.config(text=f"Обработка цвета R={color[0]} G={color[1]} B={color[2]}...")
+        select_color(*color)
+        for x, y in color_groups[color]:
+            while paused:
+                if stop_flag: return
+                time.sleep(0.1)
+            if stop_flag: return
+            click_pixel(x, y)
+            processed_pixels += 1
+            if progress_window and processed_pixels % 100 == 0:
+                progress_window.update_progress(processed_pixels, total_pixels)
+
+
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    style = ttk.Style()
+    style.theme_use('clam')  # Современный стиль
+
+    app = DrawingApp(root)
+    root.mainloop()
