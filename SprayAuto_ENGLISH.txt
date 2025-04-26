@@ -33,15 +33,6 @@ def init_db():
                   g_x INTEGER, g_y INTEGER,
                   b_x INTEGER, b_y INTEGER,
                   timestamp DATETIME)''')
-                  
-    # Новая таблица для координат сохранения
-    c.execute('''CREATE TABLE IF NOT EXISTS save_coords
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                  save_btn_x INTEGER, save_btn_y INTEGER,
-                  filename_input_x INTEGER, filename_input_y INTEGER,
-                  filename_offset INTEGER,
-                  save_confirm_x INTEGER, save_confirm_y INTEGER,
-                  timestamp DATETIME)''')
 
     conn.commit()
     conn.close()
@@ -86,46 +77,6 @@ hotkey_listener = None
 rgb_points = []
 total_pixels = 0
 processed_pixels = 0
-
-
-def save_save_coords_to_db():
-    """Сохраняет координаты сохранения в БД"""
-    conn = sqlite3.connect('spray_paint_coords.db')
-    c = conn.cursor()
-    
-    c.execute('''INSERT INTO save_coords 
-                 (save_btn_x, save_btn_y, filename_input_x, filename_input_y,
-                  filename_offset, save_confirm_x, save_confirm_y, timestamp)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
-              (SAVE_BUTTON_POS[0], SAVE_BUTTON_POS[1],
-               FILENAME_INPUT_POS[0], FILENAME_INPUT_POS[1],
-               FILENAME_CLICK_OFFSET,
-               SAVE_CONFIRM_POS[0], SAVE_CONFIRM_POS[1],
-               datetime.now()))
-    
-    conn.commit()
-    conn.close()
-
-
-def load_save_coords_from_db():
-    """Загружает последние координаты сохранения из БД"""
-    conn = sqlite3.connect('spray_paint_coords.db')
-    c = conn.cursor()
-    
-    c.execute('''SELECT save_btn_x, save_btn_y, filename_input_x, filename_input_y,
-                        filename_offset, save_confirm_x, save_confirm_y
-                 FROM save_coords 
-                 ORDER BY timestamp DESC LIMIT 1''')
-    coords = c.fetchone()
-    
-    if coords:
-        global SAVE_BUTTON_POS, FILENAME_INPUT_POS, FILENAME_CLICK_OFFSET, SAVE_CONFIRM_POS
-        SAVE_BUTTON_POS = [coords[0], coords[1]]
-        FILENAME_INPUT_POS = [coords[2], coords[3]]
-        FILENAME_CLICK_OFFSET = coords[4]
-        SAVE_CONFIRM_POS = [coords[5], coords[6]]
-    
-    conn.close()
 
 
 class ProgressWindow:
@@ -273,9 +224,6 @@ def save_coords_to_db():
                  VALUES (?, ?, ?, ?, ?, ?, ?)''',
               (R_FIELD[0], R_FIELD[1], G_FIELD[0], G_FIELD[1],
                B_FIELD[0], B_FIELD[1], datetime.now()))
-               
-    # Сохраняем координаты сохранения
-    save_save_coords_to_db()
 
     conn.commit()
     conn.close()
@@ -311,9 +259,6 @@ def load_last_coords_from_db():
         R_FIELD = [rgb_coords[0], rgb_coords[1]]
         G_FIELD = [rgb_coords[2], rgb_coords[3]]
         B_FIELD = [rgb_coords[4], rgb_coords[5]]
-        
-    # Загружаем последние координаты сохранения
-    load_save_coords_from_db()
 
     conn.close()
 
@@ -388,13 +333,11 @@ class DrawingApp:
                 processed_pixels += (prev_x - start_x + 1)
                 if progress_window and processed_pixels % 100 == 0:
                     progress_window.update_progress(processed_pixels, total_pixels)
-
     def __init__(self, root):
         self.root = root
         self.root.title("Spray Paint Drawing Tool")
         self.progress_window = None
         self.processed_data = None
-        self.save_points = []
 
         # Загружаем последние сохраненные координаты
         load_last_coords_from_db()
@@ -517,47 +460,6 @@ class DrawingApp:
                                        command=self.save_rgb_fields)
         self.save_rgb_btn.pack(side="left", padx=5)
 
-        # Save Coordinates Frame
-        self.save_frame = ttk.LabelFrame(self.main_frame, text="Save Coordinates")
-        self.save_frame.pack(fill="x", pady=5)
-        
-        # Поля для Save Button
-        ttk.Label(self.save_frame, text="Save Button:").grid(row=0, column=0, padx=5, sticky="e")
-        self.save_btn_x_entry = ttk.Entry(self.save_frame, width=6)
-        self.save_btn_x_entry.grid(row=0, column=1, padx=2)
-        self.save_btn_y_entry = ttk.Entry(self.save_frame, width=6)
-        self.save_btn_y_entry.grid(row=0, column=2, padx=2)
-        
-        # Поля для Filename Input
-        ttk.Label(self.save_frame, text="Filename Input:").grid(row=1, column=0, padx=5, sticky="e")
-        self.filename_x_entry = ttk.Entry(self.save_frame, width=6)
-        self.filename_x_entry.grid(row=1, column=1, padx=2)
-        self.filename_y_entry = ttk.Entry(self.save_frame, width=6)
-        self.filename_y_entry.grid(row=1, column=2, padx=2)
-        
-        # Поле для Offset
-        ttk.Label(self.save_frame, text="Click Offset:").grid(row=2, column=0, padx=5, sticky="e")
-        self.offset_entry = ttk.Entry(self.save_frame, width=6)
-        self.offset_entry.grid(row=2, column=1, padx=2)
-        
-        # Поля для Save Confirm
-        ttk.Label(self.save_frame, text="Save Confirm:").grid(row=3, column=0, padx=5, sticky="e")
-        self.confirm_x_entry = ttk.Entry(self.save_frame, width=6)
-        self.confirm_x_entry.grid(row=3, column=1, padx=2)
-        self.confirm_y_entry = ttk.Entry(self.save_frame, width=6)
-        self.confirm_y_entry.grid(row=3, column=2, padx=2)
-        
-        # Кнопки
-        self.save_coords_btn = ttk.Button(self.save_frame,
-                                        text="Capture Save Coords (Alt+S+LMB)",
-                                        command=self.capture_save_coords)
-        self.save_coords_btn.grid(row=4, column=0, columnspan=2, pady=5)
-        
-        self.save_save_btn = ttk.Button(self.save_frame,
-                                      text="Save Settings",
-                                      command=self.save_save_settings)
-        self.save_save_btn.grid(row=4, column=2, pady=5)
-
         # Settings Frame
         self.settings_frame = ttk.LabelFrame(self.main_frame, text="Settings")
         self.settings_frame.pack(fill="x", pady=5)
@@ -613,77 +515,6 @@ class DrawingApp:
 
         self.status_label = ttk.Label(self.status_frame, text="Select an image to begin")
         self.status_label.pack(side="right", padx=5)
-        
-        self.update_save_coords_display()
-
-    def update_save_coords_display(self):
-        """Обновляет поля ввода текущими значениями"""
-        self.save_btn_x_entry.delete(0, tk.END)
-        self.save_btn_x_entry.insert(0, str(SAVE_BUTTON_POS[0]))
-        self.save_btn_y_entry.delete(0, tk.END)
-        self.save_btn_y_entry.insert(0, str(SAVE_BUTTON_POS[1]))
-        
-        self.filename_x_entry.delete(0, tk.END)
-        self.filename_x_entry.insert(0, str(FILENAME_INPUT_POS[0]))
-        self.filename_y_entry.delete(0, tk.END)
-        self.filename_y_entry.insert(0, str(FILENAME_INPUT_POS[1]))
-        
-        self.offset_entry.delete(0, tk.END)
-        self.offset_entry.insert(0, str(FILENAME_CLICK_OFFSET))
-        
-        self.confirm_x_entry.delete(0, tk.END)
-        self.confirm_x_entry.insert(0, str(SAVE_CONFIRM_POS[0]))
-        self.confirm_y_entry.delete(0, tk.END)
-        self.confirm_y_entry.insert(0, str(SAVE_CONFIRM_POS[1]))
-    
-    def capture_save_coords(self):
-        """Захват координат для сохранения"""
-        self.save_points = []
-        self.status_label.config(text="Save coords capture: Press Alt+S+LMB")
-        self.root.iconify()
-        
-        def on_click(x, y, button, pressed):
-            if pressed and button == mouse.Button.left and keyboard.is_pressed('s') and keyboard.is_pressed('alt'):
-                self.save_points.append((x, y))
-                print(f"Captured point {len(self.save_points)}: [{x},{y}]")
-                
-                if len(self.save_points) == 1:
-                    print("Select filename input position")
-                elif len(self.save_points) == 2:
-                    print("Click slightly below filename input for offset")
-                elif len(self.save_points) == 3:
-                    print("Select save confirm position")
-                elif len(self.save_points) == 4:
-                    global SAVE_BUTTON_POS, FILENAME_INPUT_POS, FILENAME_CLICK_OFFSET, SAVE_CONFIRM_POS
-                    SAVE_BUTTON_POS[0], SAVE_BUTTON_POS[1] = self.save_points[0]
-                    FILENAME_INPUT_POS[0], FILENAME_INPUT_POS[1] = self.save_points[1]
-                    FILENAME_CLICK_OFFSET = abs(self.save_points[2][1] - self.save_points[1][1])
-                    SAVE_CONFIRM_POS[0], SAVE_CONFIRM_POS[1] = self.save_points[3]
-                    
-                    self.root.deiconify()
-                    self.update_save_coords_display()
-                    self.status_label.config(text="Save coordinates set!")
-                    return False
-        
-        print("\nPress Alt+S+LMB to capture save coordinates.")
-        listener = mouse.Listener(on_click=on_click)
-        listener.start()
-    
-    def save_save_settings(self):
-        """Сохраняет настройки сохранения из полей ввода"""
-        try:
-            SAVE_BUTTON_POS[0] = int(self.save_btn_x_entry.get())
-            SAVE_BUTTON_POS[1] = int(self.save_btn_y_entry.get())
-            FILENAME_INPUT_POS[0] = int(self.filename_x_entry.get())
-            FILENAME_INPUT_POS[1] = int(self.filename_y_entry.get())
-            FILENAME_CLICK_OFFSET = int(self.offset_entry.get())
-            SAVE_CONFIRM_POS[0] = int(self.confirm_x_entry.get())
-            SAVE_CONFIRM_POS[1] = int(self.confirm_y_entry.get())
-            
-            save_save_coords_to_db()
-            self.status_label.config(text="Save coordinates saved!")
-        except ValueError:
-            messagebox.showerror("Error", "Please enter valid numbers")
 
     def show_progress(self):
         if self.progress_window is None or not tk.Toplevel.winfo_exists(self.progress_window.top):
@@ -1009,7 +840,6 @@ class DrawingApp:
 
         filename = os.path.splitext(os.path.basename(img_path))[0]
 
-        # Используем текущие координаты из глобальных переменных
         ahk.mouse_move(SAVE_BUTTON_POS[0], SAVE_BUTTON_POS[1], speed=MOVEMENT_SPEED)
         ahk.click()
         time.sleep(0.5)
